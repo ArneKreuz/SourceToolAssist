@@ -38,6 +38,8 @@ public Plugin myinfo =
 #define BOT_Count 1
 int BotIDs[BOT_Count];
 
+int GracePeriodLastTick[MAXPLAYERS + 1];
+
 public void ResetPlayerReplaySegment(int client)
 {
 	if (!IsClientInGame(client))
@@ -49,6 +51,10 @@ public void ResetPlayerReplaySegment(int client)
 	Player_SetIsRewinding(client, false);
 	Player_SetHasRun(client, false);
 	Player_SetPlayingReplay(client, false);
+	Player_DeleteCheckpointStack(client);
+	Player_SetIsInGracePeriod(client, false);
+	Player_SetGracePeriodTargetFrame(client, 0);
+	GracePeriodLastTick[client] = -1;
 	
 	/*
 		Don't change the observer move type if they are in spec,
@@ -897,6 +903,153 @@ public Action OnTrigger(int entity, int other)
 	return Plugin_Continue;
 }
 
+public Action STA_SetCheckpoint(int client, int args)
+{
+	if (!HandlePlayerPermission(client))
+	{
+		return Plugin_Handled;
+	}
+
+	if (!Player_GetIsSegmenting(client))
+	{
+		STA_PrintMessageToClient(client, "You must be recording to set a checkpoint");
+		return Plugin_Handled;
+	}
+
+	int frame;
+
+	if (Player_GetIsRewinding(client))
+	{
+		frame = Player_GetRewindFrame(client);
+	}
+	else
+	{
+		frame = Player_GetRecordedFramesCount(client) - 1;
+	}
+
+	if (frame < 0)
+	{
+		STA_PrintMessageToClient(client, "No frames recorded yet");
+		return Plugin_Handled;
+	}
+
+	Player_PushCheckpoint(client, frame);
+
+	float frametime = frame * GetTickInterval();
+	char timebuf[64];
+	FormatTimeSpan(timebuf, sizeof(timebuf), frametime);
+
+	STA_PrintMessageToClient(client, "Checkpoint %d set at frame %d (%s)", Player_GetCheckpointCount(client), frame, timebuf);
+
+	return Plugin_Handled;
+}
+
+public Action STA_LoadCheckpoint(int client, int args)
+{
+	if (!HandlePlayerPermission(client))
+	{
+		return Plugin_Handled;
+	}
+
+	if (!Player_GetIsSegmenting(client))
+	{
+		STA_PrintMessageToClient(client, "You must be recording to load a checkpoint");
+		return Plugin_Handled;
+	}
+
+	if (!Player_HasCheckpoint(client))
+	{
+		STA_PrintMessageToClient(client, "No checkpoint set - use sm_sta_setcheckpoint first");
+		return Plugin_Handled;
+	}
+
+	int checkpointframe = Player_GetTopCheckpoint(client);
+	int framecount = Player_GetRecordedFramesCount(client);
+
+	if (checkpointframe >= framecount)
+	{
+		checkpointframe = framecount - 1;
+		Player_PopCheckpoint(client);
+		Player_PushCheckpoint(client, checkpointframe);
+	}
+
+	Player_ResizeRecordFrameList(client, checkpointframe + 1);
+
+	int graceframes = RoundToFloor(1.0 / GetTickInterval());
+	int gracestart = checkpointframe - graceframes;
+
+	if (gracestart < 0)
+	{
+		gracestart = 0;
+	}
+
+	Player_SetGracePeriodTargetFrame(client, checkpointframe);
+	Player_SetRewindFrame(client, gracestart);
+	Player_SetIsInGracePeriod(client, true);
+	Player_SetIsRewinding(client, false);
+	GracePeriodLastTick[client] = -1;
+
+	SetEntityMoveType(client, MOVETYPE_NONE);
+
+	STA_PrintMessageToClient(client, "Loading checkpoint %d...", Player_GetCheckpointCount(client));
+
+	return Plugin_Handled;
+}
+
+public Action STA_PrevCheckpoint(int client, int args)
+{
+	if (!HandlePlayerPermission(client))
+	{
+		return Plugin_Handled;
+	}
+
+	if (!Player_GetIsSegmenting(client))
+	{
+		STA_PrintMessageToClient(client, "You must be recording to navigate checkpoints");
+		return Plugin_Handled;
+	}
+
+	if (Player_GetCheckpointCount(client) <= 1)
+	{
+		STA_PrintMessageToClient(client, "No previous checkpoint");
+		return Plugin_Handled;
+	}
+
+	Player_PopCheckpoint(client);
+
+	int checkpointframe = Player_GetTopCheckpoint(client);
+	int framecount = Player_GetRecordedFramesCount(client);
+
+	if (checkpointframe >= framecount)
+	{
+		checkpointframe = framecount - 1;
+		Player_PopCheckpoint(client);
+		Player_PushCheckpoint(client, checkpointframe);
+	}
+
+	Player_ResizeRecordFrameList(client, checkpointframe + 1);
+
+	int graceframes = RoundToFloor(1.0 / GetTickInterval());
+	int gracestart = checkpointframe - graceframes;
+
+	if (gracestart < 0)
+	{
+		gracestart = 0;
+	}
+
+	Player_SetGracePeriodTargetFrame(client, checkpointframe);
+	Player_SetRewindFrame(client, gracestart);
+	Player_SetIsInGracePeriod(client, true);
+	Player_SetIsRewinding(client, false);
+	GracePeriodLastTick[client] = -1;
+
+	SetEntityMoveType(client, MOVETYPE_NONE);
+
+	STA_PrintMessageToClient(client, "Loading previous checkpoint (%d remaining)...", Player_GetCheckpointCount(client));
+
+	return Plugin_Handled;
+}
+
 /*
 	Force the bot back on course if it's off by this much squared, just for teleports and things
 */
@@ -927,9 +1080,13 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_stepback", STA_StepBack);
 	
 	RegConsoleCmd("+sm_rewind", STA_RewindDown);
-	RegConsoleCmd("-sm_rewind", STA_RewindUp);	
+	RegConsoleCmd("-sm_rewind", STA_RewindUp);
 	RegConsoleCmd("+sm_fastforward", STA_FastForwardDown);
 	RegConsoleCmd("-sm_fastforward", STA_FastForwardUp);
+
+	RegConsoleCmd("sm_sta_setcheckpoint", STA_SetCheckpoint);
+	RegConsoleCmd("sm_sta_loadcheckpoint", STA_LoadCheckpoint);
+	RegConsoleCmd("sm_sta_prevcheckpoint", STA_PrevCheckpoint);
 	
 	HookEvent("player_spawn", OnPlayerSpawn);
 	HookEvent("player_disconnect", OnPlayerDisconnect, EventHookMode_Pre);
@@ -1105,13 +1262,37 @@ public Action OnPlayerRunCmd(int client, int& buttons, int& impulse, float wishv
 	
 	if (Player_GetIsSegmenting(client) && !isfake)
 	{
-		if (Player_GetIsRewinding(client))
+		if (Player_GetIsInGracePeriod(client))
+		{
+			int curtick = GetGameTickCount();
+
+			if (curtick != GracePeriodLastTick[client])
+			{
+				GracePeriodLastTick[client] = curtick;
+				SetPlayerReplayFrame(client, client, Player_GetRewindFrame(client));
+				Player_IncrementRewindFrame(client);
+
+				if (Player_GetRewindFrame(client) > Player_GetGracePeriodTargetFrame(client))
+				{
+					Player_SetIsInGracePeriod(client, false);
+					SetEntityMoveType(client, MOVETYPE_WALK);
+					STA_PrintMessageToClient(client, "Recording resumed from checkpoint");
+				}
+			}
+			else
+			{
+				SetPlayerReplayFrame(client, client, Player_GetRewindFrame(client));
+			}
+
+			ret = Plugin_Handled;
+		}
+		else if (Player_GetIsRewinding(client))
 		{
 			HandleReplayRewind(client);
 			SetPlayerReplayFrame(client, client, Player_GetRewindFrame(client));
 			ret = Plugin_Handled;
 		}
-		
+
 		/*
 			Recording
 		*/

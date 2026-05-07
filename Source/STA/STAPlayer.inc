@@ -415,6 +415,89 @@ public void Player_SetHasRewindKeyDown(int client, bool value)
 	==============================================================
 */
 
+ArrayList CheckpointStack[MAXPLAYERS + 1];
+
+public void Player_DeleteCheckpointStack(int client)
+{
+	if (CheckpointStack[client] != null)
+	{
+		ClearArray(CheckpointStack[client]);
+		delete CheckpointStack[client];
+	}
+}
+
+public bool Player_HasCheckpoint(int client)
+{
+	return CheckpointStack[client] != null && GetArraySize(CheckpointStack[client]) > 0;
+}
+
+public int Player_GetCheckpointCount(int client)
+{
+	if (CheckpointStack[client] == null)
+		return 0;
+	return GetArraySize(CheckpointStack[client]);
+}
+
+public void Player_PushCheckpoint(int client, int frame)
+{
+	if (CheckpointStack[client] == null)
+		CheckpointStack[client] = CreateArray(1);
+	PushArrayCell(CheckpointStack[client], frame);
+}
+
+public int Player_GetTopCheckpoint(int client)
+{
+	if (!Player_HasCheckpoint(client))
+		return -1;
+	return GetArrayCell(CheckpointStack[client], GetArraySize(CheckpointStack[client]) - 1);
+}
+
+public int Player_PopCheckpoint(int client)
+{
+	if (!Player_HasCheckpoint(client))
+		return -1;
+	int idx = GetArraySize(CheckpointStack[client]) - 1;
+	int frame = GetArrayCell(CheckpointStack[client], idx);
+	RemoveFromArray(CheckpointStack[client], idx);
+	return frame;
+}
+
+/*
+	==============================================================
+*/
+
+bool IsInGracePeriod[MAXPLAYERS + 1];
+
+public bool Player_GetIsInGracePeriod(int client)
+{
+	return IsInGracePeriod[client];
+}
+
+public void Player_SetIsInGracePeriod(int client, bool value)
+{
+	IsInGracePeriod[client] = value;
+}
+
+/*
+	==============================================================
+*/
+
+int GracePeriodTargetFrame[MAXPLAYERS + 1];
+
+public int Player_GetGracePeriodTargetFrame(int client)
+{
+	return GracePeriodTargetFrame[client];
+}
+
+public void Player_SetGracePeriodTargetFrame(int client, int value)
+{
+	GracePeriodTargetFrame[client] = value;
+}
+
+/*
+	==============================================================
+*/
+
 public int Player_ClampRecordFrame(int client, int frame)
 {
 	int count = Player_GetRecordedFramesCount(client);
